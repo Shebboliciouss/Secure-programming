@@ -5,32 +5,29 @@
 #manages connections and check who is online and handle disconnction
 
 
-
+from src.utils.json_utils import deserialize_message
+from src.utils.json_utils import serialize_message
 #imports asynchio library and websockets server and clients 
 import asyncio
 import websockets
 
-#define asynchronous function 
-async def echo(websocket):
-    print("✅ Client connected")
-    #listen for messages from client 
-    try:
-        async for message in websocket:
-            #if messages is received prints in console 
-            print(f"📩 Received: {message}")
-            #send the same message back to client 
-            await websocket.send(f"Echo: {message}")
-            #if client disconnects show disconnected 
-    except websockets.exceptions.ConnectionClosedOK:
+async def handler(websocket):
+    async for message in websocket:
+        try:
+            msg = deserialize_message(message)
+            print("Received:", msg)
 
-        print("❌ Client disconnected")
+            # Echo for now (later: routing)
+            await websocket.send(serialize_message(msg))
+            print("Sent back:", msg)
 
+        except Exception as e:
+            print("Error handling message:", e)
+            await websocket.close(code=1011, reason=str(e))
 
-#start the server on local host 8765 
 async def main():
-    async with websockets.serve(echo, "localhost", 8765):
-        print("🚀 Server started on ws://localhost:8765")
+    async with websockets.serve(handler, "localhost", 8765):
+        print("Server started on ws://localhost:8765")
         await asyncio.Future()  # run forever
 
-if __name__ == "__main__":
-    asyncio.run(main())
+asyncio.run(main())
