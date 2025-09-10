@@ -1,24 +1,37 @@
 import asyncio
 import websockets
 import time 
-#define the asynchronouse function hello
-#and connect to port 
 
 from src.utils.json_utils import deserialize_message
 from src.utils.json_utils import serialize_message
 
-#Client built a USER_HELLO message (Alice introducing herself).
+# Function to format messages nicely
+def format_message(data):
+    msg_type = data.get("type")
+    sender = data.get("from")
+    recipient = data.get("to")
+    payload = data.get("payload", {})
 
-#Client serialized it into JSON → sent to server over WebSocket.
-
-#Server deserialized the JSON → printed it → re-serialized → sent it back.
-
-#Client got the echo → deserialized it → printed the reply.
-async def client(user_id, messages_to_send=None):
+    if msg_type == "MSG_PRIVATE":
+        text = payload.get("text", "")
+        return f"[{sender} → {recipient}]: {text}"
+    elif msg_type == "ACK":
+        ref = payload.get("msg_ref", "")
+        return f"[Server → {recipient}]: ACK for {ref}"
+    elif msg_type == "ERROR":
+        code = payload.get("code", "")
+        detail = payload.get("detail", "")
+        return f" [Server → {recipient}]: ERROR {code} - {detail}"
+    elif msg_type == "USER_LIST_REPLY":
+        users = payload.get("users", [])
+        return f"[Server → {recipient}]: Online users: {', '.join(users)}"
+    else:
+        return f"[{sender} → {recipient}]: {payload}"
+        
+async def client(user_id):
     uri = "ws://localhost:8765"
-    #send message ti the client 
     async with websockets.connect(uri) as websocket:
-        # Build a USER_HELLO message
+        # Send USER_HELLO
         msg = {
             "type": "USER_HELLO",
             "from": user_id,
@@ -27,52 +40,58 @@ async def client(user_id, messages_to_send=None):
             "payload": {"client": "cli-v1", "pubkey": "BASE64_PUBKEY"},
             "sig": ""
         }
-        # Serialize and send
         await websocket.send(serialize_message(msg))
         print("Sent:", msg)
 
         async def send_messages():
-            if messages_to_send:
-                for msg in messages_to_send:
-                    await asyncio.sleep(1)  # slight delay
+            while True:
+                user_input = await asyncio.get_event_loop().run_in_executor(None, input, "")
+                if user_input.lower() == "/quit":
+                    print(f"[{user_id}] Disconnecting...")
+                    await websocket.close()
+                    break
+                elif user_input.lower() == "/who":
+                    msg = {
+                        "type": "USER_LIST",
+                        "from": user_id,
+                        "to": "server_1",
+                        "ts": int(time.time() * 1000),
+                        "payload": {},
+                        "sig": ""
+                    }
                     await websocket.send(serialize_message(msg))
-                    print(f"[{user_id}] Sent MSG_PRIVATE to {msg['to']}")
-        
+                elif ":" in user_input:
+                    recipient, text = user_input.split(":", 1)
+                    msg = {
+                        "type": "MSG_PRIVATE",
+                        "from": user_id,
+                        "to": recipient.strip(),
+                        "ts": int(time.time() * 1000),
+                        "payload": {"text": text.strip()},
+                        "sig": ""
+                    }
+                    await websocket.send(serialize_message(msg))
+                else:
+                    print(" Invalid command. Use <recipient>: <message>, /who, or /quit.")
+
         async def receive_messages():
             try:
                 async for reply in websocket:
                     data = deserialize_message(reply)
-                    print(f"[{user_id}] Received: {data}")
+                    print("\n📩", format_message(data))
             except websockets.ConnectionClosed:
                 print(f"[{user_id}] Connection closed")
 
+        # 👇 Keep both running until /quit or disconnect
         await asyncio.gather(send_messages(), receive_messages())
-   
-# Example usage: Alice sends a private message to Bob
-alice_msgs = [
-    {
-        "type": "MSG_PRIVATE",
-        "from": "Alice",
-        "to": "Bob",
-        "ts": int(time.time() * 1000),
-        "payload": {
-            "ciphertext": "<b64cipher>",
-            "iv": "<b64iv>",
-            "tag": "<b64tag>",
-            "wrapped_key": "<b64key>"
-        },
-        "sig": ""
-    }
-]
 
-# Run two clients concurrently
-async def main():
-    await asyncio.gather(
-        client("Alice", messages_to_send=alice_msgs),
-        client("Bob")  # Bob just listens for messages
-    )
 
 if __name__ == "__main__":
-    asyncio.run(main())
-if __name__ == "__main__":
-    asyncio.run(client())
+    username = input("Enter your username: ")
+    asyncio.run(client(username))
+
+#Client built a USER_HELLO message (Alice introducing herself).
+
+#Client serialized it into JSON → sent to server over WebSocket.
+
+#Server deserialized the JSON → printed it → re-serialized → sent it back.

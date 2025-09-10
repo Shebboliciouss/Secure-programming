@@ -15,56 +15,77 @@ import time
 
 local_users = {}  # user_id -> websocket
 
-async def handler(websocket):   
-    async for message in websocket:
-        try:
-            msg = deserialize_message(message)
-            print("Received:", msg)
+async def handler(websocket):  
+    user_id = None  # track which user this connection belongs to 
+    try:
+        async for message in websocket:
+            try:
+                msg = deserialize_message(message)
+                print("Received:", msg) 
+                msg_type = msg.get("type")
 
-         # Handle USER_HELLO specifically
-            if msg["type"] == "USER_HELLO":
-                # Create ACK message
-                ack = {
-                    "type": "ACK",
-                    "from": "server_1",
-                    "to": msg["from"],  # send back to Alice
-                    "ts": int(time.time() * 1000),
-                    "payload": {"msg_ref": msg["type"]},
-                    "sig": ""  # will add signing later
-                }
-                await websocket.send(serialize_message(ack))
-                print("Sent ACK:", ack)
+                # Handle USER_HELLO specifically
+                if msg["type"] == "USER_HELLO":
 
-            elif msg_type == "MSG_PRIVATE":
-                recipient = msg["to"]
-                if recipient in local_users:
-                    # Deliver directly if recipient is local
-                    await local_users[recipient].send(serialize_message(msg))
-                    print(f"Delivered MSG_PRIVATE to {recipient}")
-                else:
-                    # For now, just echo back to sender if recipient unknown
-                    error_msg = {
-                        "type": "ERROR",
+                    user_id = msg["from"]
+                    local_users[user_id] = websocket
+                    # Create ACK message
+                    ack = {
+                        "type": "ACK",
                         "from": "server_1",
-                        "to": sender,
+                        "to": msg["from"],  # send back to Alice
                         "ts": int(time.time() * 1000),
-                        "payload": {"code": "USER_NOT_FOUND", "detail": f"{recipient} not registered"},
+                        "payload": {"msg_ref": msg["type"]},
+                        "sig": ""  # will add signing later
+                    }
+                    await websocket.send(serialize_message(ack))
+                    print("Sent ACK:", ack)
+
+                elif msg["type"] == "MSG_PRIVATE":
+                    sender = msg["from"]
+                    recipient = msg["to"]
+                    if recipient in local_users:
+                        # Deliver directly if recipient is local
+                        await local_users[recipient].send(serialize_message(msg))
+                        print(f"Delivered MSG_PRIVATE to {recipient}")
+                    else:
+                        # For now, just echo back to sender if recipient unknown
+                        error_msg = {
+                            "type": "ERROR",
+                            "from": "server_1",
+                            "to": sender,
+                            "ts": int(time.time() * 1000),
+                            "payload": {"code": "USER_NOT_FOUND", "detail": f"{recipient} not registered"},
+                            "sig": ""
+                        }
+                        await websocket.send(serialize_message(error_msg))
+                        print("Sent ERROR:", error_msg)
+
+                elif msg_type == "USER_LIST":
+                    user_list = list(local_users.keys())
+                    reply = {
+                        "type": "USER_LIST_REPLY",
+                        "from": "server_1",
+                        "to": msg["from"],
+                        "ts": int(time.time() * 1000),
+                        "payload": {"users": user_list},
                         "sig": ""
                     }
-                    await websocket.send(serialize_message(error_msg))
-                    print("Sent ERROR:", error_msg)
-            else:
-                await websocket.send(serialize_message(msg))
-                print("Echoed message:", msg)        
+                    await websocket.send(serialize_message(reply))
+                    print(f"Sent user list to {msg['from']}")
 
+                else:
+                    await websocket.send(serialize_message(msg))
+                    print("Echoed message:", msg)        
 
-        except websockets.ConnectionClosed:
-        # Remove user on disconnect
-         for user_id, ws in list(local_users.items()):
-            if ws == websocket:
-                print(f"{user_id} disconnected.")
-                del local_users[user_id]
-                break
+            except websockets.ConnectionClosed:
+                print(f"ConnectionClosed for {user_id}")
+
+    finally:
+        # 🟢 Remove from online list if user was logged in
+        if user_id and user_id in local_users:
+            del local_users[user_id]
+            print(f"🗑️ Removed {user_id} from connected_users")     
 
 async def main():
     async with websockets.serve(handler, "localhost", 8765):
