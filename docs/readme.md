@@ -11,7 +11,7 @@ pip install websockets
 python3 -m src.server.server rub from project root 
 python3 -m src.client.client cleint start run from root 
 
-# how to work the chat system 
+# how to wrok the chat system 
 
 -start server
 -start two or more clients 
