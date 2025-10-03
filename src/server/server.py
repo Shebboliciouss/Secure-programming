@@ -1,10 +1,10 @@
+
 # server.py
-# server purpose 
-# accepts and listens to message from client
-# receives messages from clients 
-# echos the message back to client 
-# manages connections and check who is online and handle disconnection
-# if message type is USER_HELLO send back ACK
+# Server purpose:
+# - Accepts and listens to messages from clients
+# - Receives messages from clients and routes them
+# - Manages connections, checks who is online, and handles disconnections
+# - If message type is USER_HELLO, sends back ACK
 
 import asyncio
 import websockets
@@ -51,22 +51,24 @@ async def handler(websocket):
 
                 # --- USER_HELLO ---
                 if msg_type == "USER_HELLO":
-                    user_id = sender
-                    if user_id in local_users:
-                        # Inform client username is taken
+                    requested_id = sender
+                    if requested_id in local_users:
+                        # Username taken → reject without touching original
                         err_msg = {
                             "type": "ERROR",
                             "from": "server_1",
-                            "to": user_id,
+                            "to": requested_id,
                             "ts": ts,
-                            "payload": {"code": "NAME_IN_USE", "detail": f"{user_id} already connected"},
+                            "payload": {"code": "NAME_IN_USE", "detail": f"{requested_id} already connected"},
                             "sig": ""
                         }
                         await websocket.send(serialize_message(err_msg))
-                        print(f"[Server] Username {user_id} already in use")
-                        continue  # do not add user
-                        
+                        print(f"[Server] Username {requested_id} already in use")
+                        # IMPORTANT: close connection without setting user_id
+                        return
+
                     # Accept user
+                    user_id = requested_id
                     local_users[user_id] = websocket
                     pubkey_pem = msg["payload"].get("pubkey")
                     if pubkey_pem:
@@ -181,4 +183,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
