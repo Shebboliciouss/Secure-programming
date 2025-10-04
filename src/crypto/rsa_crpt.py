@@ -1,7 +1,15 @@
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
+import json
 
-# Sign a message using RSASSA-PSS with SHA-256
+# ---------------- Crypto Helpers ----------------
+
+def canonical_payload_bytes(payload: dict) -> bytes:
+    """Convert payload dict into canonical JSON bytes for signing"""
+    return json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8')
+
+# ---------------- RSA Key Handling ----------------
+
 def sign_message(message_bytes: bytes, private_key) -> bytes:
     signature = private_key.sign(
         message_bytes,
@@ -13,7 +21,6 @@ def sign_message(message_bytes: bytes, private_key) -> bytes:
     )
     return signature
 
-# Verify a signature using RSASSA-PSS with SHA-256
 def verify_signature(public_key, message_bytes: bytes, signature: bytes) -> bool:
     try:
         public_key.verify(
@@ -29,7 +36,6 @@ def verify_signature(public_key, message_bytes: bytes, signature: bytes) -> bool
     except Exception:
         return False
 
-# Generate RSA key pair
 def generate_rsa_keypair():
     private_key = rsa.generate_private_key(
         public_exponent=65537,
@@ -37,18 +43,17 @@ def generate_rsa_keypair():
     )
     return private_key, private_key.public_key()
 
-# Export public key (PEM format, for sharing)
 def export_public_key(public_key):
     return public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
 
-# Load public key from PEM (other clients’ keys)
 def load_public_key(pem_bytes):
     return serialization.load_pem_public_key(pem_bytes)
 
-# Encrypt with RSA-OAEP
+# ---------------- RSA Encryption ----------------
+
 def encrypt_message(public_key, message: str) -> bytes:
     return public_key.encrypt(
         message.encode(),
@@ -59,7 +64,6 @@ def encrypt_message(public_key, message: str) -> bytes:
         )
     )
 
-# Decrypt  with priv kety
 def decrypt_message(private_key, ciphertext: bytes) -> str:
     return private_key.decrypt(
         ciphertext,

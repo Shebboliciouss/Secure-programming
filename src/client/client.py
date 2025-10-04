@@ -7,7 +7,7 @@ from datetime import datetime
 from src.crypto import rsa_crpt
 from src.utils.json_utils import deserialize_message, serialize_message
 
-# ------------------ Helper Functions ------------------
+# ------------------ Helpers ------------------
 
 def b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
@@ -47,10 +47,8 @@ def format_message(data, user_id):
     elif msg_type == "USER_LIST_REPLY":
         users = payload.get("users", [])
         return f"[{ts_str}] [Server → {recipient}]: Online users: {', '.join(users)}"
-    elif msg_type in ["MSG_PRIVATE", "MSG_PUBLIC_CHANNEL"]:
-        return None  # handled separately
     else:
-        return f"[{ts_str}] [{sender} → {recipient}]: {payload}"
+        return None
 
 # ------------------ Global Keys ------------------
 
@@ -80,25 +78,24 @@ async def client(username):
         await websocket.send(serialize_message(hello_msg))
         print(f"[{username}] Sent signed USER_HELLO with public key")
 
-        # Wait for server ACK or NAME_IN_USE
+        # Wait for ACK or ERROR
         while True:
             data = deserialize_message(await websocket.recv())
             if data.get("type") == "ERROR" and data["payload"].get("code") == "NAME_IN_USE":
                 print(f"[System] Username '{username}' already taken. Please try another.")
-                return False  # signal to re-prompt username
+                return False
             elif data.get("type") == "ACK":
                 print(f"[{username}] Connected successfully!")
                 known_pubkeys[username] = public_key
                 break
 
-        # Start sending/receiving
         await asyncio.gather(
             send_messages(username, websocket),
             receive_messages(username, websocket)
         )
         return True
 
-# ------------------ Send Messages ------------------
+# ------------------ Send ------------------
 
 async def send_messages(user_id, websocket):
     while True:
@@ -115,21 +112,21 @@ async def send_messages(user_id, websocket):
 
         elif user_input.lower() == "/help":
             print("[System] Available commands:")
-            print("  /help               Show this help message")
-            print("  /who                List online users")
-            print("  /dm <user> <msg>    Send direct/private message")
-            print("  /group <msg>        Send message to all users")
-            print("  /quit               Disconnect from server")
+            print("  /list               List online users")
+            print("  /tell <user> <msg>  Send private message")
+            print("  /all <msg>          Send message to all users")
+            print("  /file <user> <path> Send file to a user")
+            print("  /quit               Disconnect")
             continue
 
-        elif user_input.lower() == "/who":
+        elif user_input.lower() == "/list":
             msg = {"type": "USER_LIST", "from": user_id, "to": "server_1", "ts": ts, "payload": {}, "sig": ""}
             await websocket.send(serialize_message(msg))
 
-        elif user_input.lower().startswith("/dm "):
+        elif user_input.lower().startswith("/tell "):
             parts = user_input.split(" ", 2)
             if len(parts) < 3:
-                print("[System] Usage: /dm <recipient> <message>")
+                print("[System] Usage: /tell <recipient> <message>")
                 continue
             recipient, text = parts[1], parts[2]
             recipient_pub = known_pubkeys.get(recipient)
@@ -153,10 +150,10 @@ async def send_messages(user_id, websocket):
             await websocket.send(serialize_message(msg))
             print(f"[{format_timestamp(ts)}] [you → {recipient}]: {text}")
 
-        elif user_input.lower().startswith("/group "):
-            text = user_input[len("/group "):].strip()
+        elif user_input.lower().startswith("/all "):
+            text = user_input[len("/all "):].strip()
             if not text:
-                print("[System] Usage: /group <message>")
+                print("[System] Usage: /all <message>")
                 continue
 
             shares = []
@@ -172,15 +169,38 @@ async def send_messages(user_id, websocket):
             msg = {
                 "type": "MSG_PUBLIC_CHANNEL",
                 "from": user_id,
-                "to": "g123",
+                "to": "all",
                 "ts": ts,
                 "payload": {"shares": shares},
                 "sig": ""
             }
             await websocket.send(serialize_message(msg))
-            print(f"[{format_timestamp(ts)}] #general [you → all]: {text}")
+            print(f"[{format_timestamp(ts)}] #all [you → all]: {text}")
 
-# ------------------ Receive Messages ------------------
+        elif user_input.lower().startswith("/file "):
+            parts = user_input.split(" ", 2)
+            if len(parts) < 3:
+                print("[System] Usage: /file <recipient> <path>")
+                continue
+            recipient, path = parts[1], parts[2]
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                b64_data = b64url_encode(data)
+                msg = {
+                    "type": "FILE_TRANSFER",
+                    "from": user_id,
+                    "to": recipient,
+                    "ts": ts,
+                    "payload": {"filename": path.split("/")[-1], "data": b64_data},
+                    "sig": ""
+                }
+                await websocket.send(serialize_message(msg))
+                print(f"[{format_timestamp(ts)}] [you → {recipient}] Sent file: {path}")
+            except Exception as e:
+                print(f"[System] File error: {e}")
+
+# ------------------ Receive ------------------
 
 async def receive_messages(user_id, websocket):
     try:
@@ -190,28 +210,25 @@ async def receive_messages(user_id, websocket):
             sender = data.get("from")
             ts = data.get("ts", int(time.time() * 1000))
 
-            # USER_HELLO → store pubkeys
             if msg_type == "USER_HELLO":
                 pubkey_b64 = data["payload"].get("pubkey")
                 if pubkey_b64 and sender != user_id:
                     known_pubkeys[sender] = rsa_crpt.load_public_key(b64url_decode(pubkey_b64))
                     print(f"[System] {sender} joined! (stored public key)")
 
-            # Private messages
             elif msg_type == "MSG_PRIVATE":
                 ciphertext_b64 = data["payload"].get("ciphertext")
                 sig_b64 = data["payload"].get("content_sig")
                 sender_pub = known_pubkeys.get(sender)
                 if ciphertext_b64 and sig_b64 and sender_pub:
-                    content_bytes = (ciphertext_b64 + sender + user_id + str(ts)).encode('utf-8')
                     try:
+                        content_bytes = (ciphertext_b64 + sender + user_id + str(ts)).encode('utf-8')
                         rsa_crpt.verify_signature(sender_pub, content_bytes, b64url_decode(sig_b64))
                         plaintext = rsa_crpt.decrypt_message(private_key, b64url_decode(ciphertext_b64))
                         print(f"[{format_timestamp(ts)}] [{sender} → you]: {plaintext}")
                     except Exception:
                         print(f"[System] Failed to verify/decrypt private msg from {sender}")
 
-            # Group messages
             elif msg_type == "MSG_PUBLIC_CHANNEL":
                 payload = data.get("payload", {})
                 sender_pub_pem = payload.get("sender_pub")
@@ -219,13 +236,24 @@ async def receive_messages(user_id, websocket):
                 ciphertext_b64 = payload.get("ciphertext")
                 sig_b64 = payload.get("content_sig")
                 if sender_pub and ciphertext_b64 and sig_b64:
-                    content_bytes = (ciphertext_b64 + sender + user_id + str(ts)).encode('utf-8')
                     try:
+                        content_bytes = (ciphertext_b64 + sender + user_id + str(ts)).encode('utf-8')
                         rsa_crpt.verify_signature(sender_pub, content_bytes, b64url_decode(sig_b64))
                         plaintext = rsa_crpt.decrypt_message(private_key, b64url_decode(ciphertext_b64))
-                        print(f"[{format_timestamp(ts)}] #general [{sender} → all]: {plaintext}")
+                        print(f"[{format_timestamp(ts)}] #all [{sender} → all]: {plaintext}")
                     except Exception:
-                        print(f"[System] Failed to verify/decrypt group msg from {sender}")
+                        print(f"[System] Failed to verify/decrypt broadcast msg from {sender}")
+
+            elif msg_type == "FILE_TRANSFER":
+                payload = data.get("payload", {})
+                filename = payload.get("filename", "file.bin")
+                data_b64 = payload.get("data", "")
+                try:
+                    with open(f"recv_{filename}", "wb") as f:
+                        f.write(b64url_decode(data_b64))
+                    print(f"[{format_timestamp(ts)}] [{sender} → you] Received file: recv_{filename}")
+                except Exception as e:
+                    print(f"[System] Failed to save file: {e}")
 
             else:
                 formatted = format_message(data, user_id)
@@ -242,10 +270,12 @@ async def main():
         username = input("Enter your username: ")
         success = await client(username)
         if success:
-            break  # stop re-prompt once connected
+            break
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+
 
 #Client built a USER_HELLO message (Alice introducing herself).
 #Client serialized it into JSON → sent to server over WebSocket.
