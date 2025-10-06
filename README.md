@@ -27,3 +27,18 @@ Protocol & Scope:
 
 Audience:
 CLI users and developers from other groups who need to integrate with the class protocol.
+
+
+
+2. How to Run
+-------------
+Basic:
+ 
+
+Common options:
+
+
+Exit codes:
+
+
+Logs:
