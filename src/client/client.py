@@ -1,284 +1,338 @@
-import asyncio
-import websockets
-import time
-import base64
-import json
+import asyncio, websockets, time, uuid, os, base64, sys
 from datetime import datetime
 from src.crypto import rsa_crpt
-from src.utils.json_utils import deserialize_message, serialize_message
+from src.utils.json_utils import serialize_message, deserialize_message
+from .file_transfer_client import send_file, handle_file_message
 
-# ------------------ Helpers ------------------
-
+# ---------------- helpers ----------------
 def b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
-def b64url_decode(data: str) -> bytes:
-    rem = len(data) % 4
-    if rem:
-        data += '=' * (4 - rem)
-    return base64.urlsafe_b64decode(data)
-
-def canonical_payload_bytes(payload: dict) -> bytes:
-    return json.dumps(payload, separators=(',', ':'), sort_keys=True).encode('utf-8')
+def b64url_decode(s: str) -> bytes:
+    rem = len(s) % 4
+    if rem: s += '='*(4-rem)
+    return base64.urlsafe_b64decode(s)
 
 def format_timestamp(ts: int) -> str:
     return datetime.fromtimestamp(ts/1000).strftime("%H:%M:%S")
 
-def format_message(data, user_id):
-    msg_type = data.get("type")
-    sender = data.get("from")
-    recipient = data.get("to")
-    payload = data.get("payload", {})
-    ts = data.get("ts", int(time.time() * 1000))
-    ts_str = format_timestamp(ts)
-
-    if msg_type == "ACK":
-        ref = payload.get("msg_ref", "")
-        return f"[{ts_str}] [Server → {recipient}]: ACK for {ref}"
-    elif msg_type == "ERROR":
-        code = payload.get("code", "")
-        detail = payload.get("detail", "")
-        if code == "NAME_IN_USE":
-            return f"[{ts_str}] [System] Username already taken. Try another."
-        elif code == "USER_NOT_FOUND":
-            return f"[{ts_str}] [System] User not found: {detail}"
-        else:
-            return f"[{ts_str}] [System] ERROR {code} - {detail}"
-    elif msg_type == "USER_LIST_REPLY":
-        users = payload.get("users", [])
-        return f"[{ts_str}] [Server → {recipient}]: Online users: {', '.join(users)}"
-    else:
-        return None
-
-# ------------------ Global Keys ------------------
-
+# ---------------- global keys and mapping ----------------
 private_key, public_key = rsa_crpt.generate_rsa_keypair()
-known_pubkeys = {}  # username -> RSA public key
+known_pubkeys = {}    # user_id -> public key
+id_to_username = {}   # user_id -> username
+username_to_id = {}   # username -> user_id
+file_buffers = {}     # for incoming file chunks
 
-# ------------------ Client ------------------
+# ---------------- client ----------------
+async def client(username, server_uri="ws://localhost:8765"):
+    uri = server_uri
+    user_id = str(uuid.uuid4())  # always generate a fresh UUID
 
-async def client(username):
-    uri = "ws://localhost:8765"
-
-    async with websockets.connect(uri) as websocket:
-        # Send USER_HELLO
-        hello_payload = {
-            "client": "cli-v1",
-            "pubkey": b64url_encode(rsa_crpt.export_public_key(public_key))
+    print(f"[{username}] Connecting to {uri}...")
+    
+    async with websockets.connect(uri) as ws:
+        payload = {
+            "client":"cli-v1",
+            "pubkey": b64url_encode(rsa_crpt.export_public_key(public_key)),
+            "username": username
         }
-        ts = int(time.time() * 1000)
+        ts = int(time.time()*1000)
         hello_msg = {
-            "type": "USER_HELLO",
-            "from": username,
-            "to": "server_1",
-            "ts": ts,
-            "payload": hello_payload,
-            "sig": b64url_encode(rsa_crpt.sign_message(canonical_payload_bytes(hello_payload), private_key))
+            "type":"USER_HELLO",
+            "from":user_id,
+            "to":"server_1",
+            "ts":ts,
+            "payload":payload,
+            "sig": b64url_encode(rsa_crpt.sign_message(rsa_crpt.canonical_payload_bytes(payload), private_key))
         }
-        await websocket.send(serialize_message(hello_msg))
-        print(f"[{username}] Sent signed USER_HELLO with public key")
+        await ws.send(serialize_message(hello_msg))
+        print(f"[{username}] Sent USER_HELLO")
 
-        # Wait for ACK or ERROR
+        # Wait for ACK
         while True:
-            data = deserialize_message(await websocket.recv())
-            if data.get("type") == "ERROR" and data["payload"].get("code") == "NAME_IN_USE":
-                print(f"[System] Username '{username}' already taken. Please try another.")
+            msg = deserialize_message(await ws.recv())
+            if msg.get("type")=="ERROR" and msg.get("payload",{}).get("code")=="NAME_IN_USE":
+                print(f"[System] Name in use")
                 return False
-            elif data.get("type") == "ACK":
-                print(f"[{username}] Connected successfully!")
+            if msg.get("type")=="ACK":
+                print(f"[{username}] Connected to {uri}")
+                # Store own info by BOTH UUID and username
+                id_to_username[user_id] = username
+                username_to_id[username] = user_id
+                known_pubkeys[user_id] = public_key
                 known_pubkeys[username] = public_key
                 break
 
-        await asyncio.gather(
-            send_messages(username, websocket),
-            receive_messages(username, websocket)
-        )
+        await asyncio.gather(send_loop(user_id, ws), recv_loop(user_id, ws))
         return True
 
-# ------------------ Send ------------------
-
-async def send_messages(user_id, websocket):
+# ---------------- send loop ----------------
+async def send_loop(user_id, ws):
     while True:
-        user_input = await asyncio.get_event_loop().run_in_executor(None, input, "")
-        if not user_input:
-            continue
+        inp = await asyncio.get_event_loop().run_in_executor(None, input, "")
+        if not inp: continue
+        ts = int(time.time()*1000)
+        cmd = inp.split()[0].lower() if inp.split() else ""
 
-        ts = int(time.time() * 1000)
-
-        if user_input.lower() == "/quit":
-            await websocket.close()
-            print(f"[{user_id}] Disconnected")
+        if cmd=="/quit":
+            await ws.close()
+            print("Disconnecting...")
             break
 
-        elif user_input.lower() == "/help":
-            print("[System] Available commands:")
-            print("  /list               List online users")
-            print("  /tell <user> <msg>  Send private message")
-            print("  /all <msg>          Send message to all users")
-            print("  /file <user> <path> Send file to a user")
-            print("  /quit               Disconnect")
+        if cmd=="/help":
+            print("""Commands:
+ /quit
+ /list
+ /tell <user|username> <msg>
+ /all <msg>
+ /file <user|username> <path>
+ /debug - show local user cache
+ /help""")
             continue
 
-        elif user_input.lower() == "/list":
-            msg = {"type": "USER_LIST", "from": user_id, "to": "server_1", "ts": ts, "payload": {}, "sig": ""}
-            await websocket.send(serialize_message(msg))
+        if cmd=="/debug":
+            print(f"\n=== DEBUG INFO ===")
+            print(f"Known public keys ({len(set(known_pubkeys.values()))} unique):")
+            seen_keys = set()
+            for identifier, key in known_pubkeys.items():
+                if key not in seen_keys:
+                    seen_keys.add(key)
+                    # Find both UUID and username for this key
+                    aliases = [k for k, v in known_pubkeys.items() if v == key]
+                    print(f"  ✓ {', '.join(aliases)}")
+            print(f"Username mappings: {len(username_to_id)}")
+            print(f"==================\n")
+            continue
 
-        elif user_input.lower().startswith("/tell "):
-            parts = user_input.split(" ", 2)
-            if len(parts) < 3:
-                print("[System] Usage: /tell <recipient> <message>")
+        if cmd=="/list":
+            await ws.send(serialize_message({"type":"USER_LIST","from":user_id,"to":"server_1","ts":ts,"payload":{},"sig":""}))
+            continue
+
+        if cmd=="/tell":
+            parts = inp.split(" ",2)
+            if len(parts)<3:
+                print("[System] Usage: /tell <user|username> <msg>")
                 continue
-            recipient, text = parts[1], parts[2]
-            recipient_pub = known_pubkeys.get(recipient)
-            if not recipient_pub:
-                print(f"[System] No public key for {recipient}. Wait until they connect.")
+            recipient_input, text = parts[1], parts[2]
+            
+            # Try to resolve username to ID first
+            recipient_id = username_to_id.get(recipient_input, recipient_input)
+            
+            # Get public key
+            pub = known_pubkeys.get(recipient_id)
+            if not pub:
+                print(f"[System] User '{recipient_input}' not found or no public key available")
+                print(f"[System] Try /list to see available users")
                 continue
-
-            ciphertext = rsa_crpt.encrypt_message(recipient_pub, text)
-            ciphertext_b64 = b64url_encode(ciphertext)
-            content_bytes = (ciphertext_b64 + user_id + recipient + str(ts)).encode('utf-8')
-            sig_b64 = b64url_encode(rsa_crpt.sign_message(content_bytes, private_key))
-
+            
+            # Encrypt message
+            cipher = rsa_crpt.encrypt_message(pub, text)
+            c_b64 = b64url_encode(cipher)
+            sig_b64 = b64url_encode(rsa_crpt.sign_message((c_b64+user_id+recipient_id+str(ts)).encode(), private_key))
+            
+            # Send username when available for federated routing
+            recipient_to_send = id_to_username.get(recipient_id, recipient_input)
+            
             msg = {
-                "type": "MSG_PRIVATE",
-                "from": user_id,
-                "to": recipient,
-                "ts": ts,
-                "payload": {"ciphertext": ciphertext_b64, "content_sig": sig_b64},
-                "sig": "",
+                "type":"MSG_PRIVATE",
+                "from":user_id,
+                "to":recipient_to_send,
+                "ts":ts,
+                "payload":{
+                    "ciphertext":c_b64,
+                    "content_sig":sig_b64
+                },
+                "sig":""
             }
-            await websocket.send(serialize_message(msg))
-            print(f"[{format_timestamp(ts)}] [you → {recipient}]: {text}")
+            await ws.send(serialize_message(msg))
+            print(f"[{format_timestamp(ts)}] [you → {id_to_username.get(recipient_id,recipient_input)}]: {text}")
+            continue
 
-        elif user_input.lower().startswith("/all "):
-            text = user_input[len("/all "):].strip()
-            if not text:
+        if cmd=="/all":
+            text = inp[len("/all "):].strip()
+            if not text: 
                 print("[System] Usage: /all <message>")
                 continue
-
-            shares = []
-            for member, member_pub in known_pubkeys.items():
-                if member == user_id:
+            
+            shares=[]
+            seen_users = set()
+            
+            # Iterate over user IDs only to avoid duplicates
+            for uid in id_to_username.keys():
+                if uid == user_id or uid in seen_users:
                     continue
-                ciphertext = rsa_crpt.encrypt_message(member_pub, text)
-                ciphertext_b64 = b64url_encode(ciphertext)
-                content_bytes = (ciphertext_b64 + user_id + member + str(ts)).encode('utf-8')
-                sig_b64 = b64url_encode(rsa_crpt.sign_message(content_bytes, private_key))
-                shares.append({"member": member, "ciphertext": ciphertext_b64, "content_sig": sig_b64})
-
-            msg = {
-                "type": "MSG_PUBLIC_CHANNEL",
-                "from": user_id,
-                "to": "all",
-                "ts": ts,
-                "payload": {"shares": shares},
-                "sig": ""
-            }
-            await websocket.send(serialize_message(msg))
-            print(f"[{format_timestamp(ts)}] #all [you → all]: {text}")
-
-        elif user_input.lower().startswith("/file "):
-            parts = user_input.split(" ", 2)
-            if len(parts) < 3:
-                print("[System] Usage: /file <recipient> <path>")
+                
+                seen_users.add(uid)
+                pub = known_pubkeys.get(uid)
+                if not pub:
+                    continue
+                
+                # Encrypt for this member
+                cipher = rsa_crpt.encrypt_message(pub, text)
+                c_b64 = b64url_encode(cipher)
+                sig_b64 = b64url_encode(rsa_crpt.sign_message((c_b64+user_id+uid+str(ts)).encode(), private_key))
+                
+                # Use username in shares when available
+                member_to_send = id_to_username.get(uid, uid)
+                shares.append({
+                    "member": member_to_send,
+                    "ciphertext": c_b64,
+                    "content_sig": sig_b64
+                })
+            
+            if not shares:
+                print("[System] No other users online to broadcast to")
                 continue
-            recipient, path = parts[1], parts[2]
-            try:
-                with open(path, "rb") as f:
-                    data = f.read()
-                b64_data = b64url_encode(data)
-                msg = {
-                    "type": "FILE_TRANSFER",
-                    "from": user_id,
-                    "to": recipient,
-                    "ts": ts,
-                    "payload": {"filename": path.split("/")[-1], "data": b64_data},
-                    "sig": ""
-                }
-                await websocket.send(serialize_message(msg))
-                print(f"[{format_timestamp(ts)}] [you → {recipient}] Sent file: {path}")
-            except Exception as e:
-                print(f"[System] File error: {e}")
+            
+            msg = {
+                "type":"MSG_PUBLIC_CHANNEL",
+                "from":user_id,
+                "to":"all",
+                "ts":ts,
+                "payload":{"shares":shares},
+                "sig":""
+            }
+            await ws.send(serialize_message(msg))
+            print(f"[{format_timestamp(ts)}] #all [you → all]: {text}")
+            continue
 
-# ------------------ Receive ------------------
+        if cmd=="/file":
+            parts=inp.split(" ",2)
+            if len(parts)<3: 
+                print("[System] Usage: /file <user|username> <path>")
+                continue
+            recipient_input, path = parts[1], parts[2]
+            recipient_id = username_to_id.get(recipient_input, recipient_input)
+            
+            # Get username for sending (consistent with /tell)
+            recipient_to_send = id_to_username.get(recipient_id, recipient_input)
+            
+            pub = known_pubkeys.get(recipient_id)
+            if not pub:
+                print(f"[System] No pubkey for {recipient_input}")
+                continue
+            
+            # Pass recipient_to_send (username) to send_file
+            await send_file(ws, user_id, path, recipient_to_send, pub, lambda b: rsa_crpt.encrypt_bytes(pub, b))
+            continue
 
-async def receive_messages(user_id, websocket):
+# ---------------- receive loop ----------------
+async def recv_loop(user_id, ws):
     try:
-        async for reply in websocket:
-            data = deserialize_message(reply)
-            msg_type = data.get("type")
+        async for raw in ws:
+            data = deserialize_message(raw)
+            t = data.get("type")
             sender = data.get("from")
-            ts = data.get("ts", int(time.time() * 1000))
+            ts = data.get("ts", int(time.time()*1000))
 
-            if msg_type == "USER_HELLO":
-                pubkey_b64 = data["payload"].get("pubkey")
-                if pubkey_b64 and sender != user_id:
-                    known_pubkeys[sender] = rsa_crpt.load_public_key(b64url_decode(pubkey_b64))
-                    print(f"[System] {sender} joined! (stored public key)")
-
-            elif msg_type == "MSG_PRIVATE":
-                ciphertext_b64 = data["payload"].get("ciphertext")
-                sig_b64 = data["payload"].get("content_sig")
-                sender_pub = known_pubkeys.get(sender)
-                if ciphertext_b64 and sig_b64 and sender_pub:
+            if t=="USER_HELLO":
+                payload = data.get("payload",{})
+                pub_b64 = payload.get("pubkey")
+                uname = payload.get("username", sender)
+                
+                if pub_b64:
                     try:
-                        content_bytes = (ciphertext_b64 + sender + user_id + str(ts)).encode('utf-8')
-                        rsa_crpt.verify_signature(sender_pub, content_bytes, b64url_decode(sig_b64))
-                        plaintext = rsa_crpt.decrypt_message(private_key, b64url_decode(ciphertext_b64))
-                        print(f"[{format_timestamp(ts)}] [{sender} → you]: {plaintext}")
-                    except Exception:
-                        print(f"[System] Failed to verify/decrypt private msg from {sender}")
+                        pub_bytes = b64url_decode(pub_b64)
+                        pubkey_obj = rsa_crpt.load_public_key(pub_bytes)
+                        
+                        # Store by BOTH UUID and username for federated messages
+                        known_pubkeys[sender] = pubkey_obj
+                        known_pubkeys[uname] = pubkey_obj
+                        
+                        id_to_username[sender] = uname
+                        username_to_id[uname] = sender
+                        print(f"[System] {uname} joined!")
+                    except Exception as e:
+                        print(f"[System] Error loading pubkey for {uname}: {e}")
+                else:
+                    print(f"[System] {uname} joined (no pubkey)")
 
-            elif msg_type == "MSG_PUBLIC_CHANNEL":
-                payload = data.get("payload", {})
-                sender_pub_pem = payload.get("sender_pub")
-                sender_pub = rsa_crpt.load_public_key(b64url_decode(sender_pub_pem)) if sender_pub_pem else None
-                ciphertext_b64 = payload.get("ciphertext")
-                sig_b64 = payload.get("content_sig")
-                if sender_pub and ciphertext_b64 and sig_b64:
-                    try:
-                        content_bytes = (ciphertext_b64 + sender + user_id + str(ts)).encode('utf-8')
-                        rsa_crpt.verify_signature(sender_pub, content_bytes, b64url_decode(sig_b64))
-                        plaintext = rsa_crpt.decrypt_message(private_key, b64url_decode(ciphertext_b64))
-                        print(f"[{format_timestamp(ts)}] #all [{sender} → all]: {plaintext}")
-                    except Exception:
-                        print(f"[System] Failed to verify/decrypt broadcast msg from {sender}")
+            elif t=="USER_LIST_REPLY":
+                users=data.get("payload",{}).get("users",[])
+                print("[System] Online users:")
+                for u in users:
+                    uid = u.get("uuid")
+                    uname = u.get("username")
+                    status = "✓" if uid in known_pubkeys else "?"
+                    print(f"  - {uname} ({uid}) {status}")
 
-            elif msg_type == "FILE_TRANSFER":
-                payload = data.get("payload", {})
-                filename = payload.get("filename", "file.bin")
-                data_b64 = payload.get("data", "")
+            elif t=="MSG_PRIVATE":
+                c_b64=data["payload"].get("ciphertext")
+                sig_b64=data["payload"].get("content_sig")
+                
+                # Try to get pubkey by sender (could be UUID or username for federated messages)
+                pub=known_pubkeys.get(sender)
+                
+                if not pub:
+                    sender_name = id_to_username.get(sender, sender[:8] + "..." if len(sender) > 8 else sender)
+                    print(f"[System] Cannot decrypt message from {sender_name} - no public key")
+                    continue
                 try:
-                    with open(f"recv_{filename}", "wb") as f:
-                        f.write(b64url_decode(data_b64))
-                    print(f"[{format_timestamp(ts)}] [{sender} → you] Received file: recv_{filename}")
+                    rsa_crpt.verify_signature(pub,(c_b64+sender+user_id+str(ts)).encode(),b64url_decode(sig_b64))
+                    pt=rsa_crpt.decrypt_message(private_key,b64url_decode(c_b64))
+                    sender_display = id_to_username.get(sender, sender)
+                    print(f"[{format_timestamp(ts)}] [{sender_display} → you]: {pt}")
                 except Exception as e:
-                    print(f"[System] Failed to save file: {e}")
+                    print(f"[System] Failed to verify/decrypt private msg from {sender}: {e}")
+
+            elif t=="MSG_PUBLIC_CHANNEL":
+                for share in data.get("payload",{}).get("shares",[]):
+                    member = share.get("member")
+                    my_username = id_to_username.get(user_id, "")
+                    if member != user_id and member != my_username:
+                        continue
+                    c_b64 = share.get("ciphertext")
+                    sig_b64 = share.get("content_sig")
+                    pub = known_pubkeys.get(sender)
+                    if not pub:
+                        print(f"[System] Cannot decrypt group message from {sender} - no public key")
+                        continue
+                    try:
+                        rsa_crpt.verify_signature(pub,(c_b64+sender+user_id+str(ts)).encode(),b64url_decode(sig_b64))
+                        pt = rsa_crpt.decrypt_message(private_key,b64url_decode(c_b64))
+                        sender_display = id_to_username.get(sender, sender)
+                        print(f"[{format_timestamp(ts)}] #all [{sender_display} → all]: {pt}")
+                    except Exception as e:
+                        print(f"[System] Failed to verify/decrypt group msg from {sender}: {e}")
+
+            elif t in ["FILE_START","FILE_CHUNK","FILE_END"]:
+                handle_file_message(data,file_buffers,lambda c: rsa_crpt.decrypt_bytes(private_key,c), id_to_username)
+
+            elif t == "ERROR":
+                error_code = data.get("payload", {}).get("code")
+                error_detail = data.get("payload", {}).get("detail")
+                print(f"[System] Error: {error_code} - {error_detail}")
 
             else:
-                formatted = format_message(data, user_id)
-                if formatted:
-                    print(formatted)
+                print(f"[System] Unknown message type: {t}")
 
     except websockets.ConnectionClosed:
-        print(f"[{user_id}] Connection closed")
+        print("[System] Connection closed")
+    except Exception as e:
+        print(f"[System] Receive loop error: {e}")
 
-# ------------------ Run ------------------
-
+# ---------------- run ----------------
 async def main():
+    # Parse command line arguments
+    server_uri = "ws://localhost:8765"  # default
+    
+    if len(sys.argv) > 1:
+        arg = sys.argv[1]
+        if arg.startswith("ws://"):
+            server_uri = arg
+        else:
+            server_uri = f"ws://localhost:{arg}"
+    
+    print(f"Server: {server_uri}")
+    
     while True:
         username = input("Enter your username: ")
-        success = await client(username)
-        if success:
+        if await client(username, server_uri):
             break
 
-if __name__ == "__main__":
+if __name__=="__main__":
     asyncio.run(main())
-
-
-
 #Client built a USER_HELLO message (Alice introducing herself).
 #Client serialized it into JSON → sent to server over WebSocket.
 #Server deserialized the JSON → printed it → re-serialized → sent it back.
-
 
