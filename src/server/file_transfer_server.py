@@ -2,10 +2,7 @@
 from src.utils.json_utils import serialize_message
 
 async def handle_file_message(msg, local_users, id_to_username):
-    """
-    Relay FILE_START / FILE_CHUNK / FILE_END frames to recipient if local.
-    Logs usernames instead of UUIDs.
-    """
+   
     msg_type = msg.get("type")
     sender_id = msg.get("from")
     recipient_id = msg.get("to")

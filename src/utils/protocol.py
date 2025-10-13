@@ -3,39 +3,39 @@
 import time
 import json
 
-# ==========================
+
 # Client message types
-# ==========================
+
 HELLO_MSG = "USER_HELLO"           # User joins
 MSG_PRIVATE = "MSG_PRIVATE"        # Direct/private message
 MSG_USER_DELIVER = "USER_DELIVER"  # Server delivers message to client
 
-# ==========================
+
 # Peer server-to-server messages
-# ==========================
+
 PEER_HELLO_JOIN  = "PEER_HELLO_JOIN"  # Initial join request
 PEER_WELCOME     = "PEER_WELCOME"     # Peer acknowledges join
 PEER_HELLO_LINK  = "PEER_HELLO_LINK"  # Confirmation link
 
-# ==========================
+
 # Presence information
-# ==========================
+
 USER_ADVERTISE   = "USER_ADVERTISE"   # User connected to a server
 USER_REMOVE      = "USER_REMOVE"      # User disconnected
 
-# ==========================
+
 # Cross-server message delivery
-# ==========================
+
 PEER_DELIVER     = "PEER_DELIVER"     # Deliver message across servers
 
-# ==========================
+
 # Heartbeat
-# ==========================
+
 HEARTBEAT        = "HEARTBEAT"
 
-# ==========================
+
 # Serialization / Deserialization
-# ==========================
+
 def serialize_message(msg):
     """
     Convert a Python dictionary into a JSON string (newline-terminated for websocket).

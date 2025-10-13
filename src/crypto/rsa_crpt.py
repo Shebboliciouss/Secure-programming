@@ -1,4 +1,3 @@
-# src/crypto/rsa_crpt.py
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import serialization, hashes
 import json
@@ -36,7 +35,7 @@ def export_public_key(public_key) -> bytes:
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
-
+#VULNERABLE #VULNERABLE
 def load_public_key(pem_bytes: bytes):
     """Load RSA public key from PEM bytes"""
     return serialization.load_pem_public_key(pem_bytes)

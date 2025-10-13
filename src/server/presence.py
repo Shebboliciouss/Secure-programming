@@ -1,5 +1,4 @@
 # src/server/presence.py
-# User presence gossip protocol (Section 8.2)
 
 import time
 from src.utils.json_utils import serialize_message
@@ -10,17 +9,16 @@ def b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
 class PresenceManager:
-    """Manages user presence across the network"""
-    
+   
     def __init__(self, state):
         self.state = state
     
     async def advertise_user(self, user_id, metadata=None):
-        """Advertise user presence to all servers (Section 8.2)"""
+        """Advertise user to all connected servers"""
         username = metadata.get('username') if metadata else user_id
-        print(f"[Presence] DEBUG: advertise_user called for {username}")
-        print(f"[Presence] DEBUG: Connected servers: {list(self.state.servers.keys())}")
-        print(f"[Presence] DEBUG: Number of servers: {len(self.state.servers)}")
+        
+        print(f"[DEBUG] advertise_user called for {username}")
+        print(f"[DEBUG] Available servers: {list(self.state.servers.keys())}")
         
         payload = {
             "user_id": user_id,
@@ -40,17 +38,20 @@ class PresenceManager:
         
         sent_count = 0
         for srv_id, srv_ws in self.state.servers.items():
+            if srv_ws is None:
+                print(f"[DEBUG] Skipping {srv_id} - websocket is None")
+                continue
             try:
                 await srv_ws.send(serialize_message(advertise_msg))
                 sent_count += 1
-                print(f"[Presence] DEBUG: Sent USER_ADVERTISE to {srv_id}")
+                print(f"[DEBUG] Sent USER_ADVERTISE for {username} to {srv_id}")
             except Exception as e:
-                print(f"[Presence] DEBUG: Failed to send to {srv_id}: {e}")
+                print(f"[Presence] Failed to send to {srv_id}: {e}")
         
         print(f"[Presence] Advertised user {username} to {sent_count} servers")
     
     async def remove_user(self, user_id):
-        """Remove user from network (Section 8.2)"""
+        """Remove user from network"""
         payload = {
             "user_id": user_id,
             "server_id": self.state.server_id
@@ -73,7 +74,8 @@ class PresenceManager:
                 pass
         
         print(f"[Presence] Removed user {self.state.usernames.get(user_id, user_id)}")
-    
+
+    #vulnerable
     async def handle_user_advertise(self, msg):
         """Handle USER_ADVERTISE from remote server"""
         payload = msg.get("payload", {})
@@ -82,10 +84,9 @@ class PresenceManager:
         meta = payload.get("meta", {})
         
         username = meta.get("username", user_id)
-        print(f"[Presence] DEBUG: Received USER_ADVERTISE for {username} from {server_id}")
-        print(f"[Presence] DEBUG: Has pubkey: {'pubkey' in meta}")
         
-        # Register remote user
+        print(f"[DEBUG] handle_user_advertise: {username} from {server_id}")
+        
         self.state.add_remote_user(
             user_id, 
             server_id, 
@@ -94,12 +95,8 @@ class PresenceManager:
         )
         
         print(f"[Presence] User {username} advertised on {server_id}")
-        print(f"[Presence] DEBUG: user_keys now has {len(self.state.user_keys)} keys")
-        print(f"[Presence] DEBUG: user_locations now has {len(self.state.user_locations)} users")
         
-        # Notify local clients about this remote user
         if "pubkey" in meta:
-            print(f"[Presence] DEBUG: Notifying {len(self.state.local_users)} local clients")
             await self._notify_local_clients(user_id, meta)
     
     async def handle_user_remove(self, msg):
@@ -113,7 +110,8 @@ class PresenceManager:
     
     async def _notify_local_clients(self, user_id, meta):
         """Notify local clients about new remote user"""
-        notified_count = 0
+        print(f"[DEBUG] Notifying {len(self.state.local_users)} local clients about {meta.get('username')}")
+        
         for local_user_id, local_ws in self.state.local_users.items():
             hello_msg = {
                 "type": "USER_HELLO",
@@ -128,9 +126,6 @@ class PresenceManager:
             }
             try:
                 await local_ws.send(serialize_message(hello_msg))
-                notified_count += 1
-                print(f"[Presence] DEBUG: Notified {self.state.usernames.get(local_user_id)} about remote user")
+                print(f"[DEBUG] Notified {self.state.usernames.get(local_user_id)} about {meta.get('username')}")
             except Exception as e:
-                print(f"[Presence] DEBUG: Failed to notify {local_user_id}: {e}")
-        
-        print(f"[Presence] DEBUG: Notified {notified_count} local clients about remote user")
+                print(f"[Presence] Failed to notify {local_user_id}: {e}")

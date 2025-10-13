@@ -4,7 +4,7 @@ from src.crypto import rsa_crpt
 from src.utils.json_utils import serialize_message, deserialize_message
 from .file_transfer_client import send_file, handle_file_message
 
-# ---------------- helpers ----------------
+# helpers 
 def b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
 
@@ -16,7 +16,7 @@ def b64url_decode(s: str) -> bytes:
 def format_timestamp(ts: int) -> str:
     return datetime.fromtimestamp(ts/1000).strftime("%H:%M:%S")
 
-# ---------------- global keys and mapping ----------------
+#global keys and mapping -
 private_key, public_key = rsa_crpt.generate_rsa_keypair()
 known_pubkeys = {}    # user_id -> public key
 id_to_username = {}   # user_id -> username
@@ -26,7 +26,7 @@ file_buffers = {}     # for incoming file chunks
 # ---------------- client ----------------
 async def client(username, server_uri="ws://localhost:8765"):
     uri = server_uri
-    user_id = str(uuid.uuid4())  # always generate a fresh UUID
+    user_id = str(uuid.uuid4()) #generated fresh uuid
 
     print(f"[{username}] Connecting to {uri}...")
     
@@ -115,7 +115,7 @@ async def send_loop(user_id, ws):
                 continue
             recipient_input, text = parts[1], parts[2]
             
-            # Try to resolve username to ID first
+          
             recipient_id = username_to_id.get(recipient_input, recipient_input)
             
             # Get public key
@@ -130,7 +130,7 @@ async def send_loop(user_id, ws):
             c_b64 = b64url_encode(cipher)
             sig_b64 = b64url_encode(rsa_crpt.sign_message((c_b64+user_id+recipient_id+str(ts)).encode(), private_key))
             
-            # Send username when available for federated routing
+           
             recipient_to_send = id_to_username.get(recipient_id, recipient_input)
             
             msg = {
@@ -167,7 +167,7 @@ async def send_loop(user_id, ws):
                 if not pub:
                     continue
                 
-                # Encrypt for this member
+                # Encrypt for this member im deead
                 cipher = rsa_crpt.encrypt_message(pub, text)
                 c_b64 = b64url_encode(cipher)
                 sig_b64 = b64url_encode(rsa_crpt.sign_message((c_b64+user_id+uid+str(ts)).encode(), private_key))
@@ -204,7 +204,7 @@ async def send_loop(user_id, ws):
             recipient_input, path = parts[1], parts[2]
             recipient_id = username_to_id.get(recipient_input, recipient_input)
             
-            # Get username for sending (consistent with /tell)
+            # Get username for sending yes nice
             recipient_to_send = id_to_username.get(recipient_id, recipient_input)
             
             pub = known_pubkeys.get(recipient_id)
@@ -260,7 +260,7 @@ async def recv_loop(user_id, ws):
                 c_b64=data["payload"].get("ciphertext")
                 sig_b64=data["payload"].get("content_sig")
                 
-                # Try to get pubkey by sender (could be UUID or username for federated messages)
+                # Try to get pubkey by sender 
                 pub=known_pubkeys.get(sender)
                 
                 if not pub:

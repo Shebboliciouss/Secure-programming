@@ -1,5 +1,5 @@
 # src/server/delivery.py
-# Forwarded message delivery protocol (Section 8.3)
+
 
 import time
 from src.utils.json_utils import serialize_message
@@ -19,11 +19,7 @@ class DeliveryManager:
         """Deliver message to user on remote server (Section 8.3)"""
         recipient_location = self.state.get_user_location(recipient_id)
         
-        print(f"[Delivery] DEBUG: deliver_to_remote called for {recipient_id}")
-        print(f"[Delivery] DEBUG: recipient_location = {recipient_location}")
-        
         if not recipient_location or recipient_location == "local":
-            print(f"[Delivery] DEBUG: Recipient is local or not found, returning False")
             return False
         
         target_server_id = recipient_location
@@ -52,7 +48,7 @@ class DeliveryManager:
         
         try:
             await self.state.servers[target_server_id].send(serialize_message(deliver_msg))
-            print(f"[Delivery] Forwarded message from {sender_name} to {target_server_id} for user {recipient_id}")
+            print(f"[Delivery] Forwarded message from {sender_name} to {target_server_id}")
             return True
         except Exception as e:
             print(f"[Delivery] Failed to forward: {e}")
@@ -62,9 +58,6 @@ class DeliveryManager:
         """Handle SERVER_DELIVER - message for local user"""
         payload = msg.get("payload", {})
         user_id = payload.get("user_id")
-        
-        print(f"[Delivery] DEBUG: Received SERVER_DELIVER for user_id={user_id}")
-        print(f"[Delivery] DEBUG: is_local_user({user_id}) = {self.state.is_local_user(user_id)}")
         
         if not self.state.is_local_user(user_id):
             print(f"[Delivery] Received message for non-local user {user_id}")
