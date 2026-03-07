@@ -1,4 +1,4 @@
-# Secure-programming
+# Federted Secure Chat System
 group 47 
 
 
